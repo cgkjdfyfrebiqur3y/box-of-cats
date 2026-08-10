@@ -1,23 +1,12 @@
-name: Generate README
+```yaml
+name: Generate README Prompt
 
 on:
   push:
-    paths:
+    paths-ignore:
       - '.github/readme-prompt.txt'
-      - '**/*.py'
-      - '**/*.js'
-      - '**/*.ts'
-      - '**/*.php'
-      - '**/*.java'
-      - '**/*.go'
-      - '**/*.rs'
-      - '**/*.c'
-      - '**/*.cpp'
-      - 'package.json'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - 'Cargo.toml'
-      - 'go.mod'
+      - 'README.md'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -25,7 +14,7 @@ permissions:
   models: read
 
 jobs:
-  generate-readme:
+  generate-prompt:
     runs-on: ubuntu-latest
 
     steps:
@@ -34,24 +23,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate README with GitHub Models
+      - name: Install GitHub Models extension
+        run: |
+          gh extension install github/gh-models
+
+      - name: Generate README prompt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - <<'PY'
           import os
-          import json
           import subprocess
-          import urllib.request
 
-          prompt_file = ".github/readme-prompt.txt"
-
-          with open(prompt_file, "r", encoding="utf-8") as f:
-              instructions = f.read()
-
-          # Collect useful repository files while avoiding
-          # .git, dependencies, caches, and generated files.
-          result = subprocess.run(
+          files = subprocess.run(
               [
                   "find", ".",
                   "-type", "f",
@@ -68,24 +52,19 @@ jobs:
                   "!",
                   "-path", "./build/*",
                   "!",
-                  "-name", "README.md",
+                  "-path", "./.github/*",
                   "!",
-                  "-name", "readme-prompt.txt"
+                  "-name", "README.md"
               ],
               capture_output=True,
               text=True
-          )
-
-          files = result.stdout.splitlines()
+          ).stdout.splitlines()
 
           repository = []
 
           for filename in files:
               try:
-                  size = os.path.getsize(filename)
-
-                  # Don't send enormous files to the model.
-                  if size > 100_000:
+                  if os.path.getsize(filename) > 100_000:
                       continue
 
                   with open(filename, "r", encoding="utf-8") as f:
@@ -100,80 +79,86 @@ jobs:
 
           repository_context = "\n".join(repository)
 
-          system_prompt = """You are an expert technical writer.
+          prompt = f"""You are an expert software documentation analyst.
 
-          Generate a complete, accurate README.md for the repository.
+          Analyze the repository below.
 
-          Use the user's instructions as the primary requirements.
-          Inspect the supplied source code to understand what the project
-          actually does.
+          Create the contents of .github/readme-prompt.txt.
 
-          Do not invent features, commands, APIs, dependencies, or behavior
-          that are not supported by the source code.
+          This file will later be given to another AI which will generate
+          README.md.
 
-          Return ONLY the Markdown contents of README.md.
-          Do not wrap the answer in a Markdown code fence.
-          """
+          The prompt should tell that AI exactly what the README should
+          document based on the actual source code.
 
-          user_prompt = f"""User's README instructions:
+          Include relevant information such as:
 
-          {instructions}
+          - What the project does
+          - Its purpose
+          - Main features
+          - Installation
+          - Usage
+          - Commands
+          - APIs and endpoints
+          - Configuration
+          - Environment variables
+          - Dependencies
+          - Examples
+          - Important limitations
+          - Project structure
 
-          Repository contents:
+          Only describe functionality that actually exists.
+
+          Do not invent features.
+
+          Do not write the README itself.
+
+          Return ONLY the contents of .github/readme-prompt.txt.
+
+          Repository:
 
           {repository_context}
           """
 
-          payload = {
-              "model": "openai/gpt-4.1",
-              "messages": [
-                  {
-                      "role": "system",
-                      "content": system_prompt
-                  },
-                  {
-                      "role": "user",
-                      "content": user_prompt
-                  }
+          result = subprocess.run(
+              [
+                  "gh", "models", "run",
+                  "openai/gpt-4.1",
+                  "--prompt", prompt
               ],
-              "temperature": 0.2
-          }
-
-          request = urllib.request.Request(
-              "https://models.inference.ai.azure.com/chat/completions",
-              data=json.dumps(payload).encode("utf-8"),
-              headers={
-                  "Content-Type": "application/json",
-                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}"
-              },
-              method="POST"
+              capture_output=True,
+              text=True,
+              env=os.environ
           )
 
-          with urllib.request.urlopen(request) as response:
-              data = json.load(response)
+          if result.returncode != 0:
+              print(result.stderr)
+              raise SystemExit(result.returncode)
 
-          readme = data["choices"][0]["message"]["content"].strip()
+          os.makedirs(".github", exist_ok=True)
 
-          with open("README.md", "w", encoding="utf-8") as f:
-              f.write(readme + "\n")
+          with open(
+              ".github/readme-prompt.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              f.write(result.stdout.strip() + "\n")
 
-          print("README.md generated successfully.")
+          print("Generated .github/readme-prompt.txt")
           PY
 
-      - name: Commit README
+      - name: Commit generated prompt
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add README.md
+          git add .github/readme-prompt.txt
 
           if git diff --cached --quiet; then
-            echo "README.md has not changed."
+            echo "Prompt has not changed."
             exit 0
           fi
 
-          git commit -m "docs: automatically update README"
+          git commit -m "docs: update README generation prompt"
           git push
-      - name: Delete prompt
-        run: |
-          rm -f .github/readme-prompt.txt
+```
