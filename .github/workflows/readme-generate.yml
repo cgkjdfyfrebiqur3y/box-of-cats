@@ -4,9 +4,9 @@ name: Generate README Prompt
 on:
   push:
     paths-ignore:
-      - '.github/readme-prompt.txt'
-      - 'README.md'
-      - '.github/workflows/**'
+      - ".github/readme-prompt.txt"
+      - "README.md"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
@@ -20,10 +20,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Install GitHub Models extension
+      - name: Install GitHub Models CLI
         run: |
           gh extension install github/gh-models
 
@@ -31,109 +29,122 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 - <<'PY'
+          python3 <<'PY'
           import os
           import subprocess
 
-          files = subprocess.run(
-              [
-                  "find", ".",
-                  "-type", "f",
-                  "!",
-                  "-path", "./.git/*",
-                  "!",
-                  "-path", "./node_modules/*",
-                  "!",
-                  "-path", "./.venv/*",
-                  "!",
-                  "-path", "./venv/*",
-                  "!",
-                  "-path", "./dist/*",
-                  "!",
-                  "-path", "./build/*",
-                  "!",
-                  "-path", "./.github/*",
-                  "!",
-                  "-name", "README.md"
-              ],
-              capture_output=True,
-              text=True
-          ).stdout.splitlines()
+          excluded = {
+              ".git",
+              "node_modules",
+              ".venv",
+              "venv",
+              "dist",
+              "build",
+              ".github",
+          }
 
-          repository = []
+          source_files = []
 
-          for filename in files:
-              try:
-                  if os.path.getsize(filename) > 100_000:
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [
+                  d for d in dirs
+                  if d not in excluded
+              ]
+
+              for filename in files:
+                  path = os.path.join(root, filename)
+
+                  if filename == "README.md":
                       continue
 
-                  with open(filename, "r", encoding="utf-8") as f:
-                      content = f.read()
+                  try:
+                      if os.path.getsize(path) > 100_000:
+                          continue
 
-                  repository.append(
-                      f"\n===== {filename} =====\n{content}"
-                  )
+                      with open(path, "r", encoding="utf-8") as f:
+                          content = f.read()
 
-              except (UnicodeDecodeError, PermissionError, OSError):
-                  pass
+                      source_files.append(
+                          f"\n===== {path} =====\n{content}"
+                      )
 
-          repository_context = "\n".join(repository)
+                  except (UnicodeDecodeError, OSError):
+                      continue
 
-          prompt = f"""You are an expert software documentation analyst.
+          repository = "\n".join(source_files)
 
-          Analyze the repository below.
+          prompt = f"""
+          You are an expert software documentation analyst.
 
-          Create the contents of .github/readme-prompt.txt.
+          Analyze the source code below.
 
-          This file will later be given to another AI which will generate
-          README.md.
+          Generate the contents of:
 
-          The prompt should tell that AI exactly what the README should
-          document based on the actual source code.
+          .github/readme-prompt.txt
+
+          This file will be passed to another AI which will generate the
+          project's README.md.
+
+          The generated prompt must tell that AI what the README should
+          contain based on the ACTUAL functionality of this repository.
 
           Include relevant information such as:
 
           - What the project does
-          - Its purpose
+          - What problem it solves
           - Main features
           - Installation
+          - Setup
           - Usage
           - Commands
-          - APIs and endpoints
+          - API endpoints
           - Configuration
           - Environment variables
           - Dependencies
           - Examples
           - Important limitations
           - Project structure
+          - License information if present
 
-          Only describe functionality that actually exists.
+          IMPORTANT:
 
-          Do not invent features.
+          - Do not invent functionality.
+          - Do not assume undocumented features exist.
+          - Base everything on the supplied source code.
+          - Do not write README.md itself.
+          - Write instructions for the README-generating AI instead.
+          - Return ONLY the contents of readme-prompt.txt.
 
-          Do not write the README itself.
+          SOURCE CODE:
 
-          Return ONLY the contents of .github/readme-prompt.txt.
-
-          Repository:
-
-          {repository_context}
+          {repository}
           """
 
           result = subprocess.run(
               [
-                  "gh", "models", "run",
+                  "gh",
+                  "models",
+                  "run",
                   "openai/gpt-4.1",
-                  "--prompt", prompt
+                  "--prompt",
+                  prompt
               ],
+              env=os.environ,
               capture_output=True,
-              text=True,
-              env=os.environ
+              text=True
           )
 
           if result.returncode != 0:
+              print("GitHub Models failed:")
               print(result.stderr)
               raise SystemExit(result.returncode)
+
+          output = result.stdout.strip()
+
+          if not output:
+              raise RuntimeError(
+                  "GitHub Models returned an empty response."
+              )
 
           os.makedirs(".github", exist_ok=True)
 
@@ -142,9 +153,9 @@ jobs:
               "w",
               encoding="utf-8"
           ) as f:
-              f.write(result.stdout.strip() + "\n")
+              f.write(output + "\n")
 
-          print("Generated .github/readme-prompt.txt")
+          print("Successfully generated .github/readme-prompt.txt")
           PY
 
       - name: Commit generated prompt
@@ -155,7 +166,7 @@ jobs:
           git add .github/readme-prompt.txt
 
           if git diff --cached --quiet; then
-            echo "Prompt has not changed."
+            echo "No changes to readme-prompt.txt"
             exit 0
           fi
 
