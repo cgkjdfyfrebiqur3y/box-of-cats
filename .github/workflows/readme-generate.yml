@@ -174,3 +174,6 @@ jobs:
 
           git commit -m "docs: automatically update README"
           git push
+      - name: Delete prompt
+        run: |
+          rm -f .github/readme-prompt.txt
