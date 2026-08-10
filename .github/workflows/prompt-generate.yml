@@ -1,0 +1,175 @@
+name: Generate README Prompt
+
+on:
+  push:
+    paths-ignore:
+      - '.github/readme-prompt.txt'
+      - 'README.md'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  models: read
+
+jobs:
+  generate-prompt:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate README prompt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import json
+          import subprocess
+          import urllib.request
+
+          files = subprocess.run(
+              [
+                  "find", ".",
+                  "-type", "f",
+                  "!",
+                  "-path", "./.git/*",
+                  "!",
+                  "-path", "./node_modules/*",
+                  "!",
+                  "-path", "./.venv/*",
+                  "!",
+                  "-path", "./venv/*",
+                  "!",
+                  "-path", "./dist/*",
+                  "!",
+                  "-path", "./build/*",
+                  "!",
+                  "-path", "./.github/*",
+                  "!",
+                  "-name", "README.md"
+              ],
+              capture_output=True,
+              text=True
+          ).stdout.splitlines()
+
+          repository = []
+
+          for filename in files:
+              try:
+                  if os.path.getsize(filename) > 100_000:
+                      continue
+
+                  with open(filename, "r", encoding="utf-8") as f:
+                      content = f.read()
+
+                  repository.append(
+                      f"\n===== {filename} =====\n{content}"
+                  )
+
+              except (UnicodeDecodeError, PermissionError, OSError):
+                  pass
+
+          repository_context = "\n".join(repository)
+
+          system_prompt = """You are an expert software documentation analyst.
+
+          Analyze the supplied repository source code.
+
+          Your task is to create instructions for another AI that will later
+          generate README.md.
+
+          The output must be a README-generation prompt.
+
+          Describe what the README should explain based ONLY on functionality
+          actually present in the source code.
+
+          Include relevant areas such as:
+          - What the project does
+          - Main functionality
+          - Installation
+          - Usage
+          - Commands
+          - APIs/endpoints
+          - Configuration
+          - Environment variables
+          - Dependencies
+          - Examples
+          - Important limitations
+          - Project structure
+
+          Do not invent functionality.
+
+          Do not write the README itself.
+
+          Return ONLY the contents of the prompt file.
+          """
+
+          user_prompt = f"""Analyze this repository and create
+          .github/readme-prompt.txt for it.
+
+          Repository:
+
+          {repository_context}
+          """
+
+          payload = {
+              "model": "openai/gpt-4.1",
+              "messages": [
+                  {
+                      "role": "system",
+                      "content": system_prompt
+                  },
+                  {
+                      "role": "user",
+                      "content": user_prompt
+                  }
+              ],
+              "temperature": 0.2
+          }
+
+          request = urllib.request.Request(
+              "https://models.inference.ai.azure.com/chat/completions",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}"
+              },
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request) as response:
+              data = json.load(response)
+
+          prompt = data["choices"][0]["message"]["content"].strip()
+
+          os.makedirs(".github", exist_ok=True)
+
+          with open(
+              ".github/readme-prompt.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              f.write(prompt + "\n")
+
+          print("Generated .github/readme-prompt.txt")
+          PY
+
+      - name: Commit generated prompt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/readme-prompt.txt
+
+          if git diff --cached --quiet; then
+            echo "Prompt has not changed."
+            exit 0
+          fi
+
+          git commit -m "docs: update README generation prompt"
+          git push
