@@ -1,0 +1,176 @@
+name: Generate README
+
+on:
+  push:
+    paths:
+      - '.github/readme-prompt.txt'
+      - '**/*.py'
+      - '**/*.js'
+      - '**/*.ts'
+      - '**/*.php'
+      - '**/*.java'
+      - '**/*.go'
+      - '**/*.rs'
+      - '**/*.c'
+      - '**/*.cpp'
+      - 'package.json'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'Cargo.toml'
+      - 'go.mod'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  models: read
+
+jobs:
+  generate-readme:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate README with GitHub Models
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import json
+          import subprocess
+          import urllib.request
+
+          prompt_file = ".github/readme-prompt.txt"
+
+          with open(prompt_file, "r", encoding="utf-8") as f:
+              instructions = f.read()
+
+          # Collect useful repository files while avoiding
+          # .git, dependencies, caches, and generated files.
+          result = subprocess.run(
+              [
+                  "find", ".",
+                  "-type", "f",
+                  "!",
+                  "-path", "./.git/*",
+                  "!",
+                  "-path", "./node_modules/*",
+                  "!",
+                  "-path", "./.venv/*",
+                  "!",
+                  "-path", "./venv/*",
+                  "!",
+                  "-path", "./dist/*",
+                  "!",
+                  "-path", "./build/*",
+                  "!",
+                  "-name", "README.md",
+                  "!",
+                  "-name", "readme-prompt.txt"
+              ],
+              capture_output=True,
+              text=True
+          )
+
+          files = result.stdout.splitlines()
+
+          repository = []
+
+          for filename in files:
+              try:
+                  size = os.path.getsize(filename)
+
+                  # Don't send enormous files to the model.
+                  if size > 100_000:
+                      continue
+
+                  with open(filename, "r", encoding="utf-8") as f:
+                      content = f.read()
+
+                  repository.append(
+                      f"\n===== {filename} =====\n{content}"
+                  )
+
+              except (UnicodeDecodeError, PermissionError, OSError):
+                  pass
+
+          repository_context = "\n".join(repository)
+
+          system_prompt = """You are an expert technical writer.
+
+          Generate a complete, accurate README.md for the repository.
+
+          Use the user's instructions as the primary requirements.
+          Inspect the supplied source code to understand what the project
+          actually does.
+
+          Do not invent features, commands, APIs, dependencies, or behavior
+          that are not supported by the source code.
+
+          Return ONLY the Markdown contents of README.md.
+          Do not wrap the answer in a Markdown code fence.
+          """
+
+          user_prompt = f"""User's README instructions:
+
+          {instructions}
+
+          Repository contents:
+
+          {repository_context}
+          """
+
+          payload = {
+              "model": "openai/gpt-4.1",
+              "messages": [
+                  {
+                      "role": "system",
+                      "content": system_prompt
+                  },
+                  {
+                      "role": "user",
+                      "content": user_prompt
+                  }
+              ],
+              "temperature": 0.2
+          }
+
+          request = urllib.request.Request(
+              "https://models.inference.ai.azure.com/chat/completions",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}"
+              },
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request) as response:
+              data = json.load(response)
+
+          readme = data["choices"][0]["message"]["content"].strip()
+
+          with open("README.md", "w", encoding="utf-8") as f:
+              f.write(readme + "\n")
+
+          print("README.md generated successfully.")
+          PY
+
+      - name: Commit README
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add README.md
+
+          if git diff --cached --quiet; then
+            echo "README.md has not changed."
+            exit 0
+          fi
+
+          git commit -m "docs: automatically update README"
+          git push
